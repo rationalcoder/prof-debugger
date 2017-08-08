@@ -3,11 +3,24 @@
 #include <cstring>
 #include <string>
 #include <iostream>
+#include <thread>
 #include <cerrno>
 #include <memory>
 #include <vector>
+#include <unordered_map>
 #include <windows.h>
-#include "bucket_array.hpp"
+
+#include <fmt/fmt.hpp>
+
+#define CHECK_FREAD(dst, file)\
+do {\
+    if (fread(dst, 1, sizeof(*dst), file) != sizeof(*dst)) return false;\
+} while (false)
+
+#define CHECK_FREAD_CUSTOM(dst, file, size)\
+do {\
+    if (fread(dst, 1, size, file) != size) return false;\
+} while (false)
 
 using namespace std;
 
@@ -39,11 +52,24 @@ struct FileHeader
     }
 };
 
+// ARGB (Little Endian Order)
+union Color
+{
+    struct
+    {
+        uint8_t b;
+        uint8_t g;
+        uint8_t r;
+        uint8_t a;
+    };
+    uint32_t packed = 0;
+};
+
 struct Descriptor
 {
     uint32_t id = 0;
     uint32_t line = 0;
-    uint32_t color = 0;
+    Color color;
     uint8_t type = 0;
     uint8_t status = 0;
     uint16_t nameLength = 0;
@@ -57,20 +83,61 @@ struct SizedDescriptor
     Descriptor descriptor;
 };
 
+struct ThreadInfo
+{
+    uint64_t id;
+    std::unique_ptr<char[]> name;
+    uint32_t numContextSwitches;
+    uint32_t numBlocks;
+    uint16_t nameLength;
+};
+
+struct ContextSwitch
+{
+    uint64_t beginTime = 0;
+    uint64_t endTime = 0;
+    uint64_t targetThreadId = 0;
+    std::unique_ptr<char[]> processInfo;
+};
+
 struct Block
 {
+    uint64_t beginTime = 0;
+    uint64_t endTime = 0;
+    uint32_t id = 0;
+    std::unique_ptr<char[]> runTimeName;
 };
 
-struct BlockList
+struct SizedContextSwitch
 {
+    uint16_t size = 0;
+    ContextSwitch contextSwitch;
 };
 
+struct SizedBlock
+{
+    uint16_t size = 0;
+    Block block;
+};
+
+using SizedContextSwitchList = std::vector<SizedContextSwitch>;
+using SizedBlockList = std::vector<SizedBlock>;
 using SizedDescriptorList = std::vector<SizedDescriptor>;
+
+struct ThreadData
+{
+    ThreadInfo info;
+    SizedContextSwitchList switches;
+    SizedBlockList blocks;
+};
+
+using ThreadDataList = std::vector<ThreadData>;
 
 struct ProfilerData
 {
     FileHeader header;
     SizedDescriptorList sizedDescriptorList;
+    ThreadData threadData;
 };
 
 bool parse_args(int argc, char** argv, std::string& inFile1, std::string& inFile2)
@@ -81,65 +148,119 @@ bool parse_args(int argc, char** argv, std::string& inFile1, std::string& inFile
     return true;
 }
 
-bool parse_prof_file(FILE* file, ProfilerData& data)
+bool parse_header(FILE* file, ProfilerData& data)
 {
-    // Parse the Header
     FileHeader& header = data.header;
     auto contiguousOffset = offsetof(FileHeader, numBlocks);
-    if (fread(&header, 1, contiguousOffset, file) != contiguousOffset) return false;
+    CHECK_FREAD_CUSTOM(&header, file, contiguousOffset);
+    CHECK_FREAD(&header.numBlocks, file);
+    CHECK_FREAD(&header.blocksMemoryUsage, file);
+    CHECK_FREAD(&header.numDescriptors, file);
+    CHECK_FREAD(&header.descriptorsMemoryUsage, file);
 
-    if (fread(&header.numBlocks, 1, sizeof(uint32_t), file) != sizeof(uint32_t)) return false;
-    if (fread(&header.blocksMemoryUsage, 1, sizeof(uint64_t), file) != sizeof(uint64_t)) return false;
-    if (fread(&header.numDescriptors, 1, sizeof(uint32_t), file) != sizeof(uint32_t)) return false;
-    if (fread(&header.descriptorsMemoryUsage, 1, sizeof(uint64_t), file) != sizeof(uint64_t)) return false;
+    return true;
+}
 
-    // Parse the Descriptors
+bool parse_descriptors(FILE* file, ProfilerData& data)
+{
     SizedDescriptorList& list = data.sizedDescriptorList;
-    list.resize(header.numDescriptors);
+    list.resize(data.header.numDescriptors);
 
-    int numDescriptors = (int)header.numDescriptors;
+    int numDescriptors = (int)data.header.numDescriptors;
     for (int i = 0; i < numDescriptors; ++i) {
         constexpr size_t dynamicPartOffset = offsetof(Descriptor, name);
         SizedDescriptor& cur = list[i];
         Descriptor& desc = cur.descriptor;
 
         // Read the contiguous parts, up until the name and file name fields.
-        if (fread(&cur, 1, sizeof(uint16_t), file) != sizeof(uint16_t)) return false;
-        if (fread(&desc, 1, dynamicPartOffset, file) != dynamicPartOffset) return false;
+        CHECK_FREAD(&cur.size, file);
+        CHECK_FREAD_CUSTOM(&desc, file, dynamicPartOffset);
 
         uint16_t nameLength = desc.nameLength;
         uint16_t fileNameLength = cur.size - dynamicPartOffset - nameLength;
         desc.name = std::unique_ptr<char[]>(new char[nameLength]);
         desc.fileName = std::unique_ptr<char[]>(new char[fileNameLength]);
 
-        if (fread(desc.name.get(), 1, nameLength, file) != nameLength) return false;
-        if (fread(desc.fileName.get(), 1, fileNameLength, file) != fileNameLength) return false;
+        CHECK_FREAD_CUSTOM(desc.name.get(), file, desc.nameLength);
+        CHECK_FREAD_CUSTOM(desc.fileName.get(), file, fileNameLength);
     }
 
     return true;
 }
 
-void write_profiler_data(const ProfilerData& data, FILE* file)
-{
-    const FileHeader& header = data.header;
-    fprintf(file, "Header Contents:\n");
-    char* signature = (char*)&header.signature;
-    fprintf(file, "Signature: %d(%c%c%c%c)\n", header.signature, signature[0], signature[1], signature[2], signature[3]);
+//bool parse_thread_data(FILE* file, ProfilerData& data)
+//{
+//    ThreadData& threadData = data.threadData;
+//    ThreadInfo& info = threadData.info;
+//    SizedContextSwitchList& cSwitches = threadData.switches;
+//    SizedBlockList& blocks = threadData.blocks;
+//
+//    // "THREAD EVENTS AND BLOCKS" (See doc.) sections continue until eof.
+//    //while (!feof(file)) {
+//    //    CHECK_FREAD(info.id, file);
+//    //    CHECK_FREAD(info.nameLength, file);
+//    //}
+//
+//    return true;
+//}
 
+bool parse_prof_file(FILE* file, ProfilerData& data)
+{
+    if (!parse_header(file, data)) return false;
+    if (!parse_descriptors(file, data)) return false;
+//    if (!parse_thread_data(file, data)) return false;
+
+    return true;
+}
+
+void write_header(const FileHeader& header, FILE* file)
+{
+    fprintf(file, "Header:\n");
+    const char* signature = (const char*)&header.signature;
+    fmt::ifprintf(file, 4, "Signature: %d(%c%c%c%c)\n", header.signature, signature[0], signature[1],
+                                                        signature[2], signature[3]);
     const FileVersion& version = header.version;
-    fprintf(file, "Version: %d.%d.%d\n", version.major, version.minor, version.patch);
-    fprintf(file, "Profiled Process ID: %llu\n", header.profiledProcessId);
-    fprintf(file, "CPU Frequency Ratio: %lld\n", header.cpuFrequencyRatio);
-    fprintf(file, "Begin Time: %llu\n", header.beginTime);
+    fmt::ifprintf(file, 4, "Version: %d.%d.%d\n", version.major, version.minor, version.patch);
+    fmt::ifprintf(file, 4, "Profiled Process ID: %llu\n", header.profiledProcessId);
+    fmt::ifprintf(file, 4, "CPU Frequency Ratio: %lld\n", header.cpuFrequencyRatio);
+    fmt::ifprintf(file, 4, "Begin Time: %llu\n", header.beginTime);
 
     double duration = 100*((header.endTime - header.beginTime)/(double)header.cpuFrequencyRatio);
-    fprintf(file, "End Time: %llu (Total time: %f ms)\n", header.endTime, duration);
-    fprintf(file, "Num Blocks: %u\n", header.numBlocks);
-    fprintf(file, "Blocks Memory Usage: %llu\n", header.blocksMemoryUsage);
-    fprintf(file, "Num Descriptors: %u\n", header.numDescriptors);
-    fprintf(file, "Descriptor Memory Usage: %llu\n", header.descriptorsMemoryUsage);
+    fmt::ifprintf(file, 4, "End Time: %llu (Total time: %f ms)\n", header.endTime, duration);
+    fmt::ifprintf(file, 4, "Num Blocks: %u\n", header.numBlocks);
+    fmt::ifprintf(file, 4, "Blocks Memory Usage: %llu\n", header.blocksMemoryUsage);
+    fmt::ifprintf(file, 4, "Num Descriptors: %u\n", header.numDescriptors);
+    fmt::ifprintf(file, 4, "Descriptor Memory Usage: %llu\n", header.descriptorsMemoryUsage);
+}
 
+void write_descriptors(const SizedDescriptorList& list, FILE* file)
+{
     fprintf(file, "Descriptors:\n");
+    for (const SizedDescriptor& sd : list) {
+        const Descriptor& d = sd.descriptor;
+        fmt::ifprintf(file, 4, "Descriptor for block: %s\n", d.name.get());
+        fmt::ifprintf(file, 4, "Size: %u\n", sd.size);
+        fmt::ifprintf(file, 4, "ID: %u\n", d.id);
+        fmt::ifprintf(file, 4, "Line: %u\n", d.line);
+        const Color& color = d.color;
+        fmt::ifprintf(file, 4, "Color(ARGB): Packed: %u, Unpacked: (%u, %u, %u, %u)\n",
+                               color.packed, color.a, color.r, color.g, color.b);
+        fmt::ifprintf(file, 4, "Type: %u\n", d.type);
+        fmt::ifprintf(file, 4, "Status: %u\n", d.status);
+        fmt::ifprintf(file, 4, "Name Length: %u\n", d.nameLength);
+        fmt::ifprintf(file, 4, "Name: %s\n", d.name.get());
+
+        uint32_t fileNameLength = sd.size - offsetof(Descriptor, name) - d.nameLength;
+        fmt::ifprintf(file, 4, "File Name: %s (%u bytes)\n", d.fileName.get(), fileNameLength);
+    }
+}
+
+void write_profiler_data(const ProfilerData& data, FILE* file)
+{
+    write_header(data.header, file);
+    fprintf(file, "\n");
+    write_descriptors(data.sizedDescriptorList, file);
+    fprintf(file, "\n");
 }
 
 bool print_file(const std::string& fileName)
