@@ -14,7 +14,13 @@
 
 #define CHECK_FREAD(dst, file)\
 do {\
-    if (fread(dst, 1, sizeof(*dst), file) != sizeof(*dst)) return false;\
+    int result = fread(dst, 1, sizeof(*dst), file);\
+    if (result != sizeof(*dst)) {\
+        fprintf(stderr, "Error reading field: " #dst\
+                        ": (Expected %d, Actual: %d) %s\n", sizeof(*dst), result, \
+                        strerror(errno));\
+        return false;\
+    }\
 } while (false)
 
 #define CHECK_FREAD_CUSTOM(dst, file, size)\
@@ -105,7 +111,7 @@ struct Block
     uint64_t beginTime = 0;
     uint64_t endTime = 0;
     uint32_t id = 0;
-    std::unique_ptr<char[]> runTimeName;
+    std::unique_ptr<char[]> runtimeName;
 };
 
 struct SizedContextSwitch
@@ -137,7 +143,7 @@ struct ProfilerData
 {
     FileHeader header;
     SizedDescriptorList sizedDescriptorList;
-    ThreadData threadData;
+    ThreadDataList threadDataList;
 };
 
 bool parse_args(int argc, char** argv, std::string& inFile1, std::string& inFile2)
@@ -167,7 +173,7 @@ bool parse_descriptors(FILE* file, ProfilerData& data)
     list.resize(data.header.numDescriptors);
 
     int numDescriptors = (int)data.header.numDescriptors;
-    for (int i = 0; i < numDescriptors; ++i) {
+    for (int i = 0; i < numDescriptors; i++) {
         constexpr size_t dynamicPartOffset = offsetof(Descriptor, name);
         SizedDescriptor& cur = list[i];
         Descriptor& desc = cur.descriptor;
@@ -188,27 +194,93 @@ bool parse_descriptors(FILE* file, ProfilerData& data)
     return true;
 }
 
-//bool parse_thread_data(FILE* file, ProfilerData& data)
-//{
-//    ThreadData& threadData = data.threadData;
-//    ThreadInfo& info = threadData.info;
-//    SizedContextSwitchList& cSwitches = threadData.switches;
-//    SizedBlockList& blocks = threadData.blocks;
-//
-//    // "THREAD EVENTS AND BLOCKS" (See doc.) sections continue until eof.
-//    //while (!feof(file)) {
-//    //    CHECK_FREAD(info.id, file);
-//    //    CHECK_FREAD(info.nameLength, file);
-//    //}
-//
-//    return true;
-//}
+bool parse_thread_data(FILE* file, ProfilerData& data)
+{
+    // "THREAD EVENTS AND BLOCKS" (See doc.) sections continue until eof.
+
+    int cur = ftell(file);
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fprintf(stderr, "Failed to seek: %s\n", strerror(errno));
+        return false;
+    }
+
+    int fileSize = ftell(file);
+    if (fseek(file, cur, SEEK_SET) != 0) {
+        fprintf(stderr, "Failed to seek: %s\n", strerror(errno));
+        return false;
+    }
+
+    int offset = cur;
+    printf("start: %ld\n", ftell(file));
+    fflush(stdout);
+    for (int i = 0; offset < fileSize; i++) {
+        data.threadDataList.emplace_back();
+
+        ThreadData& threadData = data.threadDataList[i];
+        ThreadInfo& info = threadData.info;
+        SizedContextSwitchList& cSwitches = threadData.switches;
+        SizedBlockList& blocks = threadData.blocks;
+
+        printf("at id: %ld\n", ftell(file));
+        fflush(stdout);
+
+        CHECK_FREAD(&info.id, file);
+        CHECK_FREAD(&info.nameLength, file);
+
+        uint32_t nameLength = info.nameLength;
+        info.name = std::unique_ptr<char[]>(new char[nameLength]);
+        CHECK_FREAD_CUSTOM(info.name.get(), file, nameLength);
+
+
+        CHECK_FREAD(&info.numContextSwitches, file);
+
+        uint32_t numContextSwitches = info.numContextSwitches;
+        cSwitches.resize(numContextSwitches);
+        for (int i = 0; i < (int)numContextSwitches; i++) {
+            constexpr uint32_t contiguousOffset = offsetof(ContextSwitch, processInfo);
+            SizedContextSwitch& ss = cSwitches[i];
+            ContextSwitch& cur = ss.contextSwitch;
+
+            CHECK_FREAD(&ss.size, file);
+            CHECK_FREAD_CUSTOM(&cur, file, contiguousOffset);
+
+            uint32_t processInfoSize = ss.size - contiguousOffset;
+            cur.processInfo = std::unique_ptr<char[]>(new char[processInfoSize]);
+        }
+
+        CHECK_FREAD(&info.numBlocks, file);
+        uint32_t numBlocks = info.numBlocks;
+        blocks.resize(numBlocks);
+        for (int i = 0; i < (int)numBlocks; i++) {
+            constexpr uint32_t contiguousOffset = sizeof(uint64_t)*2 + sizeof(uint32_t);
+            SizedBlock& sb = blocks[i];
+            Block& cur = sb.block;
+
+            CHECK_FREAD(&sb.size, file);
+            CHECK_FREAD(&cur.beginTime, file);
+            CHECK_FREAD(&cur.endTime, file);
+            CHECK_FREAD(&cur.id, file);
+            //CHECK_FREAD_CUSTOM(&cur, file, contiguousOffset);
+
+            if (sb.size != 0) {
+                uint32_t runtimeNameSize = sb.size - contiguousOffset;
+                cur.runtimeName = std::unique_ptr<char[]>(new char[runtimeNameSize]);
+                CHECK_FREAD_CUSTOM(cur.runtimeName.get(), file, runtimeNameSize);
+            }
+        }
+        offset += ftell(file);
+        printf("offset: %d\n", offset);
+        fflush(stdout);
+    }
+
+    return true;
+}
 
 bool parse_prof_file(FILE* file, ProfilerData& data)
 {
     if (!parse_header(file, data)) return false;
     if (!parse_descriptors(file, data)) return false;
-//    if (!parse_thread_data(file, data)) return false;
+    if (!parse_thread_data(file, data)) return false;
 
     return true;
 }
@@ -272,8 +344,9 @@ bool print_file(const std::string& fileName)
     }
 
     ProfilerData data;
-    parse_prof_file(file, data);
-    fprintf(stdout, "File: %s\n", fileName.c_str());
+    if (!parse_prof_file(file, data)) return false;
+
+    fprintf(file, "File: %s\n", fileName.c_str());
     write_profiler_data(data, stdout);
 
     fclose(file);
@@ -285,10 +358,16 @@ int main(int argc, char** argv)
     std::string inFile1;
     std::string inFile2;
     if (!parse_args(argc, argv, inFile1, inFile2)) return EXIT_FAILURE;
-    if (!print_file(inFile1)) return EXIT_FAILURE;
+    //if (!print_file(inFile1)) {
+    //    fprintf(stderr, "Error Parsing \"%s\"\n", inFile1.c_str());
+    //    return EXIT_FAILURE;
+    //}
 
     printf("\n");
-    if (!print_file(inFile2)) return EXIT_FAILURE;
+    if (!print_file(inFile2)) {
+        fprintf(stderr, "Error Parsing \"%s\"\n", inFile2.c_str());
+        return EXIT_FAILURE;
+    }
 
     return EXIT_SUCCESS;
 }
