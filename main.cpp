@@ -211,8 +211,6 @@ bool parse_thread_data(FILE* file, ProfilerData& data)
     }
 
     int offset = cur;
-    printf("start: %ld\n", ftell(file));
-    fflush(stdout);
     for (int i = 0; offset < fileSize; i++) {
         data.threadDataList.emplace_back();
 
@@ -220,9 +218,6 @@ bool parse_thread_data(FILE* file, ProfilerData& data)
         ThreadInfo& info = threadData.info;
         SizedContextSwitchList& cSwitches = threadData.switches;
         SizedBlockList& blocks = threadData.blocks;
-
-        printf("at id: %ld\n", ftell(file));
-        fflush(stdout);
 
         CHECK_FREAD(&info.id, file);
         CHECK_FREAD(&info.nameLength, file);
@@ -269,8 +264,6 @@ bool parse_thread_data(FILE* file, ProfilerData& data)
             }
         }
         offset += ftell(file);
-        printf("offset: %d\n", offset);
-        fflush(stdout);
     }
 
     return true;
@@ -327,12 +320,23 @@ void write_descriptors(const SizedDescriptorList& list, FILE* file)
     }
 }
 
+void write_thread_data(const ThreadDataList& list, FILE* file)
+{
+    fprintf(file, "Per Thread Data:\n");
+    for (int i = 0; i < list.size(); i++) {
+        const ThreadData& cur = list[i];
+    }
+}
+
 void write_profiler_data(const ProfilerData& data, FILE* file)
 {
     write_header(data.header, file);
     fprintf(file, "\n");
+
     write_descriptors(data.sizedDescriptorList, file);
     fprintf(file, "\n");
+
+    write_thread_data(data.threadDataList, file);
 }
 
 bool print_file(const std::string& fileName)
@@ -345,8 +349,6 @@ bool print_file(const std::string& fileName)
 
     ProfilerData data;
     if (!parse_prof_file(file, data)) return false;
-
-    fprintf(file, "File: %s\n", fileName.c_str());
     write_profiler_data(data, stdout);
 
     fclose(file);
@@ -358,16 +360,17 @@ int main(int argc, char** argv)
     std::string inFile1;
     std::string inFile2;
     if (!parse_args(argc, argv, inFile1, inFile2)) return EXIT_FAILURE;
-    //if (!print_file(inFile1)) {
-    //    fprintf(stderr, "Error Parsing \"%s\"\n", inFile1.c_str());
-    //    return EXIT_FAILURE;
-    //}
-
-    printf("\n");
-    if (!print_file(inFile2)) {
-        fprintf(stderr, "Error Parsing \"%s\"\n", inFile2.c_str());
+    fprintf(stdout, "File: %s\n", inFile1.c_str());
+    if (!print_file(inFile1)) {
+        fprintf(stderr, "Error Parsing \"%s\"\n", inFile1.c_str());
         return EXIT_FAILURE;
     }
+
+    printf("\n");
+    //if (!print_file(inFile2)) {
+    //    fprintf(stderr, "Error Parsing \"%s\"\n", inFile2.c_str());
+    //    return EXIT_FAILURE;
+    //}
 
     return EXIT_SUCCESS;
 }
