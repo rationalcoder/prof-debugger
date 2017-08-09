@@ -211,7 +211,7 @@ bool parse_thread_data(FILE* file, ProfilerData& data)
     }
 
     int offset = cur;
-    for (int i = 0; offset < fileSize; i++) {
+    for (int i = 0; offset < fileSize; i++, offset = ftell(file)) {
         data.threadDataList.emplace_back();
 
         ThreadData& threadData = data.threadDataList[i];
@@ -255,15 +255,13 @@ bool parse_thread_data(FILE* file, ProfilerData& data)
             CHECK_FREAD(&cur.beginTime, file);
             CHECK_FREAD(&cur.endTime, file);
             CHECK_FREAD(&cur.id, file);
-            //CHECK_FREAD_CUSTOM(&cur, file, contiguousOffset);
 
-            if (sb.size != 0) {
-                uint32_t runtimeNameSize = sb.size - contiguousOffset;
-                cur.runtimeName = std::unique_ptr<char[]>(new char[runtimeNameSize]);
-                CHECK_FREAD_CUSTOM(cur.runtimeName.get(), file, runtimeNameSize);
-            }
+            if (sb.size == 0) sb.size = 21;
+
+            uint32_t runtimeNameSize = sb.size - contiguousOffset;
+            cur.runtimeName = std::unique_ptr<char[]>(new char[runtimeNameSize]);
+            CHECK_FREAD_CUSTOM(cur.runtimeName.get(), file, runtimeNameSize);
         }
-        offset += ftell(file);
     }
 
     return true;
@@ -323,8 +321,53 @@ void write_descriptors(const SizedDescriptorList& list, FILE* file)
 void write_thread_data(const ThreadDataList& list, FILE* file)
 {
     fprintf(file, "Per Thread Data:\n");
-    for (int i = 0; i < list.size(); i++) {
+    for (int i = 0; i < (int)list.size(); i++) {
         const ThreadData& cur = list[i];
+        const ThreadInfo& info = cur.info;
+
+        fmt::ifprintf(file, 0, "Thread Info:\n");
+        fmt::ifprintf(file, 4, "ID: %llu\n", info.id);
+        fmt::ifprintf(file, 4, "Name: %s\n", info.name.get());
+        fmt::ifprintf(file, 4, "Name Length: %u\n", info.nameLength);
+        fmt::ifprintf(file, 4, "Num Context Switches: %u\n", info.numContextSwitches);
+        fmt::ifprintf(file, 4, "Num Blocks: %u\n", info.numBlocks);
+        fprintf(file, "\n");
+
+        fmt::Tree tree;
+        tree.fprintf_root(file, "Context Switches:\n");
+
+        const SizedContextSwitchList& switchList = cur.switches;
+
+        uint32_t numSwitches = switchList.size();
+        for (int i = 0; i < (int)numSwitches; i++) {
+            const SizedContextSwitch& sw = switchList[i];
+            const ContextSwitch& cs = sw.contextSwitch;
+
+            tree.fprintf_last_if(i == (int)numSwitches-1, file, 1, "CS %d:\n", i);
+            tree.fprintf_level(file, 2, "Process Info:\n", cs.processInfo.get());
+            tree.fprintf_level(file, 2, "Target Thread ID:\n", cs.targetThreadId);
+            tree.fprintf_level(file, 2, "Begin Time: %llu\n", cs.beginTime);
+            tree.fprintf_level(file, 2, "End Time: %llu\n", cs.endTime);
+            tree.fprintf_last(file, 2, "Size:\n", sw.size);
+        }
+
+        tree.fprintf_root(file, "Blocks:\n");
+
+        const SizedBlockList& blocks = cur.blocks;
+        uint32_t numBlocks = blocks.size();
+        for (int i = 0; i < (int)numBlocks; i++) {
+            const SizedBlock& sb = blocks[i];
+            const Block& cur = sb.block;
+
+            tree.fprintf_last_if(i == (int)numBlocks-1, file, 1, "Block %d:\n", i);
+            tree.fprintf_level(file, 2, "Size: %u\n", sb.size);
+            tree.fprintf_level(file, 2, "Name: %s\n", cur.runtimeName.get());
+            tree.fprintf_level(file, 2, "ID: %u\n", cur.id);
+            tree.fprintf_level(file, 2, "Begin Time: %llu\n", cur.beginTime);
+            tree.fprintf_last(file, 2, "End Time: %llu\n", cur.endTime);
+        }
+
+        fprintf(file, "\n");
     }
 }
 
@@ -367,10 +410,11 @@ int main(int argc, char** argv)
     }
 
     printf("\n");
-    //if (!print_file(inFile2)) {
-    //    fprintf(stderr, "Error Parsing \"%s\"\n", inFile2.c_str());
-    //    return EXIT_FAILURE;
-    //}
+    fprintf(stdout, "File: %s\n", inFile2.c_str());
+    if (!print_file(inFile2)) {
+        fprintf(stderr, "Error Parsing \"%s\"\n", inFile2.c_str());
+        return EXIT_FAILURE;
+    }
 
     return EXIT_SUCCESS;
 }
