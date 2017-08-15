@@ -359,7 +359,7 @@ void write_thread_data(const ThreadDataList& list, FILE* file)
             const SizedBlock& sb = blocks[i];
             const Block& cur = sb.block;
 
-            tree.fprintf_last_if(i == (int)numBlocks-1, file, 1, "Block %d:\n", i);
+            tree.fprintf_last_if(i == numBlocks-1, file, 1, "Block %d:\n", i);
             tree.fprintf_level(file, 2, "Size: %u\n", sb.size);
             tree.fprintf_level(file, 2, "Name: %s\n", cur.runtimeName.get());
             tree.fprintf_level(file, 2, "ID: %u\n", cur.id);
