@@ -338,12 +338,12 @@ void write_thread_data(const ThreadDataList& list, FILE* file)
 
         const SizedContextSwitchList& switchList = cur.switches;
 
-        uint32_t numSwitches = switchList.size();
-        for (int i = 0; i < (int)numSwitches; i++) {
+        int64_t numSwitches = (int64_t)switchList.size();
+        for (int64_t i = 0; i < numSwitches; i++) {
             const SizedContextSwitch& sw = switchList[i];
             const ContextSwitch& cs = sw.contextSwitch;
 
-            tree.fprintf_last_if(i == (int)numSwitches-1, file, 1, "CS %d:\n", i);
+            tree.fprintf_last_if(i == numSwitches-1, file, 1, "CS %d:\n", i);
             tree.fprintf_level(file, 2, "Process Info:\n", cs.processInfo.get());
             tree.fprintf_level(file, 2, "Target Thread ID:\n", cs.targetThreadId);
             tree.fprintf_level(file, 2, "Begin Time: %llu\n", cs.beginTime);
@@ -354,8 +354,8 @@ void write_thread_data(const ThreadDataList& list, FILE* file)
         tree.fprintf_root(file, "Blocks:\n");
 
         const SizedBlockList& blocks = cur.blocks;
-        uint32_t numBlocks = blocks.size();
-        for (int i = 0; i < (int)numBlocks; i++) {
+        int64_t numBlocks = (int64_t)blocks.size();
+        for (int64_t i = 0; i < (int64_t)numBlocks; i++) {
             const SizedBlock& sb = blocks[i];
             const Block& cur = sb.block;
 
@@ -403,6 +403,7 @@ int main(int argc, char** argv)
     std::string inFile1;
     std::string inFile2;
     if (!parse_args(argc, argv, inFile1, inFile2)) return EXIT_FAILURE;
+    
     fprintf(stdout, "File: %s\n", inFile1.c_str());
     if (!print_file(inFile1)) {
         fprintf(stderr, "Error Parsing \"%s\"\n", inFile1.c_str());
